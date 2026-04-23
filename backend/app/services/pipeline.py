@@ -1,0 +1,220 @@
+"""
+Celery task pipeline for meeting processing.
+Steps: upload → transcribe → diarize → analyze → generate protocol/tasks
+"""
+
+import asyncio
+import os
+import tempfile
+from pathlib import Path
+from typing import Any, Dict
+from uuid import UUID
+
+from celery import Celery
+from celery.utils.log import get_task_logger
+from sqlalchemy import select
+
+from app.core.config import settings
+from app.core.database import AsyncSessionLocal
+from app.models.models import Meeting, MeetingStatus, MeetingTask, Protocol, Transcript
+from app.services.transcription import transcription_service, diarization_service
+from app.services.nlp import keyword_extractor, contact_extractor, sentiment_analyzer
+from app.services.llm import llm_service
+from app.services.storage import storage_service
+
+logger = get_task_logger(__name__)
+
+celery_app = Celery("meeting_assistant")
+celery_app.conf.update(
+    broker_url=settings.CELERY_BROKER_URL,
+    result_backend=settings.CELERY_RESULT_BACKEND,
+    task_serializer="json",
+    result_serializer="json",
+    accept_content=["json"],
+    task_track_started=True,
+    worker_max_tasks_per_child=10,  # Prevent memory leaks with large models
+)
+
+
+def run_async(coro):
+    """Run an async coroutine from sync Celery task."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+async def _update_meeting_status(meeting_id: str, status: MeetingStatus, **kwargs):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Meeting).where(Meeting.id == UUID(meeting_id)))
+        meeting = result.scalar_one_or_none()
+        if meeting:
+            meeting.status = status
+            for k, v in kwargs.items():
+                setattr(meeting, k, v)
+            await db.commit()
+
+
+async def _publish_progress(meeting_id: str, step: str, progress: int):
+    """Publish progress to Redis channel for WebSocket delivery."""
+    import redis.asyncio as aioredis
+    r = aioredis.from_url(settings.REDIS_URL)
+    import json
+    await r.publish(
+        f"meeting:{meeting_id}:progress",
+        json.dumps({"step": step, "progress": progress, "meeting_id": meeting_id}),
+    )
+    await r.aclose()
+
+
+@celery_app.task(bind=True, name="process_meeting", max_retries=2)
+def process_meeting(self, meeting_id: str):
+    """
+    Main pipeline task:
+    1. Download audio from MinIO
+    2. Transcribe with Whisper
+    3. Diarize speakers
+    4. NLP analysis
+    5. Generate summary, protocol, tasks
+    """
+    try:
+        run_async(_process_meeting_async(meeting_id, self))
+    except Exception as exc:
+        logger.error(f"Meeting {meeting_id} processing failed: {exc}")
+        run_async(_update_meeting_status(meeting_id, MeetingStatus.FAILED))
+        raise self.retry(exc=exc, countdown=60)
+
+
+async def _process_meeting_async(meeting_id: str, task):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Meeting).where(Meeting.id == UUID(meeting_id)))
+        meeting = result.scalar_one_or_none()
+        if not meeting:
+            raise ValueError(f"Meeting {meeting_id} not found")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # ── Step 1: Download audio ────────────────────────────────────────────
+        await _publish_progress(meeting_id, "Загрузка аудио", 5)
+        await _update_meeting_status(meeting_id, MeetingStatus.TRANSCRIBING)
+
+        audio_path = os.path.join(tmpdir, "audio.wav")
+        object_key = meeting.audio_object_key or meeting.video_object_key
+
+        await storage_service.download_file(
+            bucket=settings.MINIO_BUCKET_AUDIO,
+            object_key=object_key,
+            dest_path=audio_path,
+        )
+
+        # If it's a video, extract audio
+        if object_key and object_key.lower().endswith((".mp4", ".mkv", ".webm", ".avi")):
+            wav_path = os.path.join(tmpdir, "extracted.wav")
+            await transcription_service.extract_audio(audio_path, wav_path)
+            audio_path = wav_path
+
+        # ── Step 2: Transcribe ────────────────────────────────────────────────
+        await _publish_progress(meeting_id, "Транскрибация", 20)
+        transcript_result = await transcription_service.transcribe(audio_path)
+
+        # ── Step 3: Speaker diarization ───────────────────────────────────────
+        await _publish_progress(meeting_id, "Разметка спикеров", 45)
+        await _update_meeting_status(meeting_id, MeetingStatus.DIARIZING)
+
+        diarization = await diarization_service.diarize(audio_path)
+        segments = diarization_service.merge_transcript_with_diarization(
+            transcript_result["segments"], diarization
+        )
+
+        # ── Step 4: NLP analysis ──────────────────────────────────────────────
+        await _publish_progress(meeting_id, "Анализ текста", 60)
+        await _update_meeting_status(meeting_id, MeetingStatus.ANALYZING)
+
+        full_text = transcript_result["text"]
+        keywords = keyword_extractor.extract(full_text)
+        contacts = contact_extractor.extract(full_text)
+        sentiment = sentiment_analyzer.analyze(full_text, segments)
+
+        # ── Step 5: LLM — summary ─────────────────────────────────────────────
+        await _publish_progress(meeting_id, "Генерация саммари", 70)
+        transcript_with_speakers = _format_transcript(segments)
+        summary = await llm_service.generate_summary(transcript_with_speakers)
+
+        # ── Step 6: Save transcript ───────────────────────────────────────────
+        async with AsyncSessionLocal() as db:
+            transcript = Transcript(
+                meeting_id=UUID(meeting_id),
+                raw_text=full_text,
+                segments=segments,
+                language_detected=transcript_result.get("language"),
+                summary=summary,
+                keywords=keywords,
+                contacts=contacts,
+                sentiment=sentiment,
+            )
+            db.add(transcript)
+            await db.commit()
+
+        # ── Step 7: LLM — protocol ────────────────────────────────────────────
+        await _publish_progress(meeting_id, "Генерация протокола", 80)
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(Meeting).where(Meeting.id == UUID(meeting_id)))
+            mtg = result.scalar_one()
+
+            participants_str = ", ".join(
+                {seg["speaker"] for seg in segments}
+            )
+            date_str = mtg.meeting_date.strftime("%d.%m.%Y") if mtg.meeting_date else "—"
+
+        protocol_md = await llm_service.generate_protocol(
+            transcript_with_speakers,
+            date=date_str,
+            participants=participants_str,
+        )
+
+        # ── Step 8: LLM — tasks ───────────────────────────────────────────────
+        await _publish_progress(meeting_id, "Извлечение задач", 90)
+        extracted_tasks = await llm_service.extract_tasks(transcript_with_speakers)
+
+        # ── Step 9: Persist protocol and tasks ────────────────────────────────
+        async with AsyncSessionLocal() as db:
+            protocol = Protocol(
+                meeting_id=UUID(meeting_id),
+                content_md=protocol_md,
+            )
+            db.add(protocol)
+
+            for t in extracted_tasks:
+                task_obj = MeetingTask(
+                    meeting_id=UUID(meeting_id),
+                    title=t.get("title", "Задача")[:500],
+                    description=t.get("description"),
+                    assignee_name_raw=t.get("assignee_name"),
+                    priority=t.get("priority", "medium"),
+                    source_segment=t.get("source_segment"),
+                )
+                db.add(task_obj)
+
+            await db.commit()
+
+        # ── Step 10: Complete ─────────────────────────────────────────────────
+        await _update_meeting_status(meeting_id, MeetingStatus.COMPLETED)
+        await _publish_progress(meeting_id, "Обработка завершена", 100)
+        logger.info(f"Meeting {meeting_id} processed successfully")
+
+
+def _format_transcript(segments) -> str:
+    """Format segments as readable transcript with speaker labels."""
+    lines = []
+    current_speaker = None
+    for seg in segments:
+        spk = seg.get("speaker", "SPEAKER_00")
+        text = seg.get("text", "").strip()
+        if spk != current_speaker:
+            lines.append(f"\n[{spk}]: {text}")
+            current_speaker = spk
+        else:
+            lines.append(text)
+    return " ".join(lines)

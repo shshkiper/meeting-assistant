@@ -1,0 +1,66 @@
+# ПРОТОКОЛ СОВЕЩАНИЯ № {{ protocol_number }}
+
+**Дата проведения:** {{ date }}
+**Время:** {{ time_start }} — {{ time_end }}
+**Место / Платформа:** {{ location }}
+**Форма проведения:** {{ format }}
+
+---
+
+## УЧАСТНИКИ
+
+| № | ФИО | Должность / Подразделение | Роль |
+|---|-----|--------------------------|------|
+{% for p in participants %}| {{ loop.index }} | {{ p.name }} | {{ p.department }} | {{ p.role }} |
+{% endfor %}
+
+**Председатель:** {{ chair }}
+**Секретарь:** {{ secretary }}
+
+---
+
+## 1. ПОВЕСТКА ДНЯ
+
+{% for item in agenda %}{{ loop.index }}. {{ item }}
+{% endfor %}
+
+---
+
+## 2. ХОД СОВЕЩАНИЯ
+
+{% for item in discussion_items %}
+### {{ loop.index }}. {{ item.title }}
+
+{{ item.content }}
+
+{% endfor %}
+
+---
+
+## 3. ПРИНЯТЫЕ РЕШЕНИЯ
+
+{% for decision in decisions %}{{ loop.index }}. {{ decision }}
+{% endfor %}
+
+---
+
+## 4. ПОРУЧЕНИЯ
+
+| № | Поручение | Ответственный | Срок исполнения | Статус |
+|---|-----------|---------------|-----------------|--------|
+{% for task in tasks %}| {{ loop.index }} | {{ task.title }} | {{ task.assignee or '—' }} | {{ task.due_date or '—' }} | Открыто |
+{% endfor %}
+
+---
+
+## 5. СЛЕДУЮЩЕЕ СОВЕЩАНИЕ
+
+**Дата:** {{ next_meeting_date or 'Не определена' }}
+**Тема:** {{ next_meeting_topic or '—' }}
+
+---
+
+*Протокол составлен автоматически системой MeetingAssistant.*
+*Секретарь:* ______________________ / {{ secretary }} /
+
+*Председатель:* ______________________ / {{ chair }} /

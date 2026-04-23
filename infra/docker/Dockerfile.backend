@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+# System dependencies: ffmpeg for audio extraction, build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    build-essential \
+    libsndfile1 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first (layer caching)
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Download spaCy Russian model
+RUN python -m spacy download ru_core_news_sm || true
+
+# Download Dostoevsky model for sentiment
+RUN python -c "from dostoevsky.data import DataDownloader; DataDownloader().download('fasttext-social-network-model')" || true
+
+COPY . .
+
+# Create logs directory
+RUN mkdir -p logs
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
