@@ -1,13 +1,3 @@
-# MeetingAssistant — Цифровой ассистент для обработки совещаний
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.111-green.svg)](https://fastapi.tiangolo.com)
-[![React 18](https://img.shields.io/badge/React-18-61DAFB.svg)](https://reactjs.org)
-
-Корпоративная on-premise система для автоматической обработки записей совещаний: транскрибация, разметка ролей, генерация протоколов, постановка задач.
-
----
 
 ## Архитектура
 
@@ -70,10 +60,6 @@
 - **Tailwind CSS** — стили
 - **shadcn/ui** — компоненты
 
-### Инфраструктура
-- **Docker Compose** — локальное развёртывание
-- **Nginx** — reverse proxy
-- **Kubernetes** — production (манифесты включены)
 
 ## Быстрый старт
 
@@ -127,6 +113,4 @@ meeting-assistant/
 - **Извлечение задач**: Precision > 80%, Recall > 75%
 - **Время обработки**: < 0.3x от длины записи (1 час → < 18 минут)
 
-## Лицензия
 
-MIT — см. [LICENSE](LICENSE)
