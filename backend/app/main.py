@@ -1,6 +1,4 @@
-"""
-MeetingAssistant Backend — FastAPI application entry point.
-"""
+# Точка входа в приложение — тут создаётся FastAPI и подключаются все роуты
 
 from contextlib import asynccontextmanager
 
@@ -25,7 +23,7 @@ from app.api import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application startup / shutdown lifecycle."""
+    # Выполняется при старте и завершении приложения
     setup_logging()
     await init_db()
     yield
@@ -41,7 +39,7 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 
-# ── Middleware ────────────────────────────────────────────────────────────────
+# Middleware — сжатие ответов и разрешение запросов с фронтенда
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
@@ -51,7 +49,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Routers ───────────────────────────────────────────────────────────────────
+# Подключаем все роуты
 PREFIX = "/api/v1"
 
 app.include_router(auth.router,           prefix=PREFIX + "/auth",          tags=["Auth"])
@@ -66,4 +64,5 @@ app.include_router(ws.router,             prefix="/ws",                     tags
 
 @app.get("/health", tags=["System"])
 async def health_check():
+    # Простая проверка что сервер живой
     return {"status": "ok", "service": "meeting-assistant-api"}

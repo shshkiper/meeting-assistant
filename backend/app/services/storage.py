@@ -1,4 +1,4 @@
-"""MinIO object storage service."""
+# Сервис для работы с MinIO — загрузка, скачивание и удаление файлов
 
 import os
 from io import BytesIO
@@ -17,6 +17,7 @@ class StorageService:
 
     @property
     def client(self) -> Minio:
+        # Создаём клиент при первом обращении (ленивая инициализация)
         if self._client is None:
             self._client = Minio(
                 endpoint=settings.MINIO_ENDPOINT,
@@ -28,13 +29,14 @@ class StorageService:
         return self._client
 
     def _ensure_buckets(self):
+        # Создаём бакеты если их ещё нет
         for bucket in [settings.MINIO_BUCKET_AUDIO, settings.MINIO_BUCKET_DOCS]:
             try:
                 if not self._client.bucket_exists(bucket):
                     self._client.make_bucket(bucket)
-                    logger.info(f"Created MinIO bucket: {bucket}")
+                    logger.info(f"Создан бакет MinIO: {bucket}")
             except S3Error as e:
-                logger.error(f"MinIO bucket error: {e}")
+                logger.error(f"Ошибка бакета MinIO: {e}")
 
     async def upload_file(
         self,
@@ -43,7 +45,7 @@ class StorageService:
         data: bytes,
         content_type: str = "application/octet-stream",
     ) -> str:
-        """Upload bytes to MinIO. Returns object key."""
+        # Загружаем байты в MinIO
         self.client.put_object(
             bucket_name=bucket,
             object_name=object_key,
@@ -51,23 +53,23 @@ class StorageService:
             length=len(data),
             content_type=content_type,
         )
-        logger.info(f"Uploaded {object_key} to {bucket} ({len(data)} bytes)")
+        logger.info(f"Загружен файл {object_key} в {bucket} ({len(data)} байт)")
         return object_key
 
     async def upload_file_path(
         self, bucket: str, object_key: str, file_path: str, content_type: str = "application/octet-stream"
     ) -> str:
-        """Upload file from disk path."""
+        # Загружаем файл с диска в MinIO
         self.client.fput_object(bucket, object_key, file_path, content_type=content_type)
         return object_key
 
     async def download_file(self, bucket: str, object_key: str, dest_path: str) -> None:
-        """Download file from MinIO to disk."""
+        # Скачиваем файл из MinIO на диск
         self.client.fget_object(bucket, object_key, dest_path)
-        logger.info(f"Downloaded {object_key} to {dest_path}")
+        logger.info(f"Скачан файл {object_key} в {dest_path}")
 
     async def get_presigned_url(self, bucket: str, object_key: str, expires_hours: int = 1) -> str:
-        """Generate temporary download URL."""
+        # Генерируем временную ссылку для скачивания файла
         from datetime import timedelta
         url = self.client.presigned_get_object(
             bucket, object_key, expires=timedelta(hours=expires_hours)

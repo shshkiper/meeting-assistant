@@ -1,5 +1,6 @@
-"""Meetings CRUD + file upload endpoint."""
+# Эндпоинты для работы с совещаниями: список, детали, загрузка файла, удаление
 
+import io
 import uuid
 import mimetypes
 from typing import List
@@ -18,11 +19,18 @@ from app.services.pipeline import process_meeting
 
 router = APIRouter()
 
+# Разрешённые форматы файлов
 ALLOWED_AUDIO_MIME = {
     "audio/mpeg", "audio/wav", "audio/x-wav", "audio/ogg",
     "audio/mp4", "audio/aac", "audio/flac", "audio/webm",
     "video/mp4", "video/webm", "video/x-matroska", "video/avi",
 }
+
+# Максимальный размер файла — 2 ГБ
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
+
+# Размер одного куска при чтении файла из памяти
+CHUNK_SIZE = 8 * 1024 * 1024  # 8 МБ
 
 
 @router.get("/", response_model=List[MeetingRead])
@@ -32,6 +40,7 @@ async def list_meetings(
     skip: int = 0,
     limit: int = 50,
 ):
+    # Возвращаем только совещания текущего пользователя
     result = await db.execute(
         select(Meeting)
         .where(Meeting.owner_id == current_user.id)
@@ -51,7 +60,10 @@ async def get_meeting(
     result = await db.execute(select(Meeting).where(Meeting.id == meeting_id))
     meeting = result.scalar_one_or_none()
     if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
+        raise HTTPException(status_code=404, detail="Совещание не найдено")
+    # Проверяем что это совещание принадлежит текущему пользователю
+    if meeting.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому совещанию")
     return meeting
 
 
@@ -63,21 +75,35 @@ async def create_meeting(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Upload recording and create meeting — triggers async processing pipeline."""
-    # Validate MIME type
+    # Проверяем тип файла
     content_type = file.content_type or mimetypes.guess_type(file.filename or "")[0] or ""
     if content_type not in ALLOWED_AUDIO_MIME:
         raise HTTPException(
             status_code=415,
-            detail=f"Unsupported media type: {content_type}. Allowed: audio/video files.",
+            detail=f"Недопустимый формат файла: {content_type}. Разрешены аудио и видеофайлы.",
         )
+
+    # Читаем файл кусками чтобы не грузить всё в память сразу
+    chunks = []
+    total_size = 0
+    while True:
+        chunk = await file.read(CHUNK_SIZE)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail="Файл слишком большой. Максимальный размер — 2 ГБ."
+            )
+        chunks.append(chunk)
+    data = b"".join(chunks)
 
     meeting_id = uuid.uuid4()
     ext = (file.filename or "audio").rsplit(".", 1)[-1].lower()
     object_key = f"{meeting_id}/recording.{ext}"
 
-    # Upload to MinIO
-    data = await file.read()
+    # Загружаем в MinIO
     await storage_service.upload_file(
         bucket=settings.MINIO_BUCKET_AUDIO,
         object_key=object_key,
@@ -85,7 +111,7 @@ async def create_meeting(
         content_type=content_type,
     )
 
-    # Persist meeting record
+    # Сохраняем запись в базу
     is_video = content_type.startswith("video/")
     meeting = Meeting(
         id=meeting_id,
@@ -100,7 +126,7 @@ async def create_meeting(
     await db.commit()
     await db.refresh(meeting)
 
-    # Kick off Celery pipeline
+    # Запускаем обработку через Celery
     task = process_meeting.delay(str(meeting_id))
     meeting.celery_task_id = task.id
     await db.commit()
@@ -117,8 +143,8 @@ async def delete_meeting(
     result = await db.execute(select(Meeting).where(Meeting.id == meeting_id))
     meeting = result.scalar_one_or_none()
     if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
+        raise HTTPException(status_code=404, detail="Совещание не найдено")
     if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not your meeting")
+        raise HTTPException(status_code=403, detail="Нет доступа к этому совещанию")
     await db.delete(meeting)
     await db.commit()

@@ -1,7 +1,5 @@
-"""
-WebSocket endpoint for real-time meeting processing progress.
-Subscribes to Redis pub/sub channel and forwards messages to client.
-"""
+# WebSocket-эндпоинт для отправки прогресса обработки совещания в реальном времени.
+# Подписывается на канал Redis и пересылает обновления клиенту.
 
 import asyncio
 import json
@@ -18,9 +16,18 @@ router = APIRouter()
 @router.websocket("/meetings/{meeting_id}/progress")
 async def meeting_progress_ws(websocket: WebSocket, meeting_id: str):
     await websocket.accept()
-    logger.info(f"WS connected for meeting {meeting_id}")
+    logger.info(f"WebSocket подключён для совещания {meeting_id}")
 
-    redis = aioredis.from_url(settings.REDIS_URL)
+    # Если Redis недоступен — сразу сообщаем клиенту и закрываем соединение
+    try:
+        redis = aioredis.from_url(settings.REDIS_URL)
+        await redis.ping()
+    except Exception as e:
+        logger.warning(f"Redis недоступен, WebSocket не может работать: {e}")
+        await websocket.send_text(json.dumps({"error": "Сервер прогресса временно недоступен"}))
+        await websocket.close()
+        return
+
     pubsub = redis.pubsub()
     channel = f"meeting:{meeting_id}:progress"
 
@@ -34,13 +41,13 @@ async def meeting_progress_ws(websocket: WebSocket, meeting_id: str):
                     data = data.decode()
                 await websocket.send_text(data)
             else:
-                # Ping to keep connection alive
+                # Пингуем чтобы соединение не закрылось по таймауту
                 await websocket.send_text(json.dumps({"ping": True}))
                 await asyncio.sleep(2)
     except WebSocketDisconnect:
-        logger.info(f"WS disconnected for meeting {meeting_id}")
+        logger.info(f"WebSocket отключён для совещания {meeting_id}")
     except Exception as e:
-        logger.error(f"WS error: {e}")
+        logger.error(f"Ошибка WebSocket: {e}")
     finally:
         await pubsub.unsubscribe(channel)
         await pubsub.aclose()

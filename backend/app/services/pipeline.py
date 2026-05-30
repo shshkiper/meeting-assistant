@@ -1,7 +1,5 @@
-"""
-Celery task pipeline for meeting processing.
-Steps: upload → transcribe → diarize → analyze → generate protocol/tasks
-"""
+# Celery-задача для обработки совещания.
+# Шаги: скачать аудио → транскрибация → диаризация → NLP → протокол и задачи
 
 import asyncio
 import os
@@ -32,12 +30,12 @@ celery_app.conf.update(
     result_serializer="json",
     accept_content=["json"],
     task_track_started=True,
-    worker_max_tasks_per_child=10,  # Prevent memory leaks with large models
+    worker_max_tasks_per_child=10,  # перезапускаем воркер каждые 10 задач, чтобы не копилась память
 )
 
 
 def run_async(coro):
-    """Run an async coroutine from sync Celery task."""
+    # Celery синхронный, а наш код асинхронный — создаём новый event loop для каждой задачи
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -58,31 +56,29 @@ async def _update_meeting_status(meeting_id: str, status: MeetingStatus, **kwarg
 
 
 async def _publish_progress(meeting_id: str, step: str, progress: int):
-    """Publish progress to Redis channel for WebSocket delivery."""
-    import redis.asyncio as aioredis
-    r = aioredis.from_url(settings.REDIS_URL)
-    import json
-    await r.publish(
-        f"meeting:{meeting_id}:progress",
-        json.dumps({"step": step, "progress": progress, "meeting_id": meeting_id}),
-    )
-    await r.aclose()
+    # Отправляем прогресс в Redis чтобы фронтенд получил обновление по WebSocket.
+    # Если Redis недоступен — просто пишем в лог и продолжаем, не роняем пайплайн.
+    try:
+        import json
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.REDIS_URL)
+        await r.publish(
+            f"meeting:{meeting_id}:progress",
+            json.dumps({"step": step, "progress": progress, "meeting_id": meeting_id}),
+        )
+        await r.aclose()
+    except Exception as e:
+        logger.warning(f"Не удалось отправить прогресс в Redis (шаг: {step}): {e}")
 
 
 @celery_app.task(bind=True, name="process_meeting", max_retries=2)
 def process_meeting(self, meeting_id: str):
-    """
-    Main pipeline task:
-    1. Download audio from MinIO
-    2. Transcribe with Whisper
-    3. Diarize speakers
-    4. NLP analysis
-    5. Generate summary, protocol, tasks
-    """
+    # Главная задача обработки совещания.
+    # При ошибке пробуем ещё раз через 60 секунд (максимум 2 попытки).
     try:
         run_async(_process_meeting_async(meeting_id, self))
     except Exception as exc:
-        logger.error(f"Meeting {meeting_id} processing failed: {exc}")
+        logger.error(f"Ошибка обработки совещания {meeting_id}: {exc}")
         run_async(_update_meeting_status(meeting_id, MeetingStatus.FAILED))
         raise self.retry(exc=exc, countdown=60)
 
@@ -95,7 +91,7 @@ async def _process_meeting_async(meeting_id: str, task):
             raise ValueError(f"Meeting {meeting_id} not found")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # ── Step 1: Download audio ────────────────────────────────────────────
+        # Шаг 1: скачиваем файл из MinIO на диск
         await _publish_progress(meeting_id, "Загрузка аудио", 5)
         await _update_meeting_status(meeting_id, MeetingStatus.TRANSCRIBING)
 
@@ -108,17 +104,17 @@ async def _process_meeting_async(meeting_id: str, task):
             dest_path=audio_path,
         )
 
-        # If it's a video, extract audio
+        # Если это видео — вытаскиваем аудиодорожку через ffmpeg
         if object_key and object_key.lower().endswith((".mp4", ".mkv", ".webm", ".avi")):
             wav_path = os.path.join(tmpdir, "extracted.wav")
             await transcription_service.extract_audio(audio_path, wav_path)
             audio_path = wav_path
 
-        # ── Step 2: Transcribe ────────────────────────────────────────────────
+        # Шаг 2: транскрибация через Whisper
         await _publish_progress(meeting_id, "Транскрибация", 20)
         transcript_result = await transcription_service.transcribe(audio_path)
 
-        # ── Step 3: Speaker diarization ───────────────────────────────────────
+        # Шаг 3: определяем кто говорил (диаризация)
         await _publish_progress(meeting_id, "Разметка спикеров", 45)
         await _update_meeting_status(meeting_id, MeetingStatus.DIARIZING)
 
@@ -127,7 +123,7 @@ async def _process_meeting_async(meeting_id: str, task):
             transcript_result["segments"], diarization
         )
 
-        # ── Step 4: NLP analysis ──────────────────────────────────────────────
+        # Шаг 4: NLP-анализ — ключевые слова, контакты, тональность
         await _publish_progress(meeting_id, "Анализ текста", 60)
         await _update_meeting_status(meeting_id, MeetingStatus.ANALYZING)
 
@@ -136,12 +132,12 @@ async def _process_meeting_async(meeting_id: str, task):
         contacts = contact_extractor.extract(full_text)
         sentiment = sentiment_analyzer.analyze(full_text, segments)
 
-        # ── Step 5: LLM — summary ─────────────────────────────────────────────
+        # Шаг 5: LLM генерирует краткое саммари
         await _publish_progress(meeting_id, "Генерация саммари", 70)
         transcript_with_speakers = _format_transcript(segments)
         summary = await llm_service.generate_summary(transcript_with_speakers)
 
-        # ── Step 6: Save transcript ───────────────────────────────────────────
+        # Шаг 6: сохраняем транскрипт в базу
         async with AsyncSessionLocal() as db:
             transcript = Transcript(
                 meeting_id=UUID(meeting_id),
@@ -156,7 +152,7 @@ async def _process_meeting_async(meeting_id: str, task):
             db.add(transcript)
             await db.commit()
 
-        # ── Step 7: LLM — protocol ────────────────────────────────────────────
+        # Шаг 7: LLM генерирует полный протокол в Markdown
         await _publish_progress(meeting_id, "Генерация протокола", 80)
 
         async with AsyncSessionLocal() as db:
@@ -174,11 +170,11 @@ async def _process_meeting_async(meeting_id: str, task):
             participants=participants_str,
         )
 
-        # ── Step 8: LLM — tasks ───────────────────────────────────────────────
+        # Шаг 8: LLM извлекает задачи и поручения
         await _publish_progress(meeting_id, "Извлечение задач", 90)
         extracted_tasks = await llm_service.extract_tasks(transcript_with_speakers)
 
-        # ── Step 9: Persist protocol and tasks ────────────────────────────────
+        # Шаг 9: сохраняем протокол и задачи в базу
         async with AsyncSessionLocal() as db:
             protocol = Protocol(
                 meeting_id=UUID(meeting_id),
@@ -199,14 +195,14 @@ async def _process_meeting_async(meeting_id: str, task):
 
             await db.commit()
 
-        # ── Step 10: Complete ─────────────────────────────────────────────────
+        # Шаг 10: помечаем совещание как обработанное
         await _update_meeting_status(meeting_id, MeetingStatus.COMPLETED)
         await _publish_progress(meeting_id, "Обработка завершена", 100)
-        logger.info(f"Meeting {meeting_id} processed successfully")
+        logger.info(f"Совещание {meeting_id} успешно обработано")
 
 
 def _format_transcript(segments) -> str:
-    """Format segments as readable transcript with speaker labels."""
+    # Собираем транскрипт в читаемый текст — каждая реплика с именем спикера
     lines = []
     current_speaker = None
     for seg in segments:

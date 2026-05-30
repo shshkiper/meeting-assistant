@@ -1,7 +1,4 @@
-"""
-Transcription service using OpenAI Whisper (local, on-premise).
-Supports audio and video files via ffmpeg extraction.
-"""
+# Сервис транскрибации через Whisper и диаризации через pyannote.audio
 
 import asyncio
 import tempfile
@@ -17,24 +14,25 @@ from app.core.config import settings
 
 
 class TranscriptionService:
-    """Wraps Whisper for local, on-premise audio transcription."""
+    # Работает с Whisper локально, без интернета
 
     _model: Optional[whisper.Whisper] = None
 
     @classmethod
     def get_model(cls) -> whisper.Whisper:
+        # Загружаем модель один раз и кешируем
         if cls._model is None:
-            logger.info(f"Loading Whisper model: {settings.WHISPER_MODEL}")
+            logger.info(f"Загружаем модель Whisper: {settings.WHISPER_MODEL}")
             cls._model = whisper.load_model(
                 settings.WHISPER_MODEL,
                 device=settings.WHISPER_DEVICE,
             )
-            logger.info("Whisper model loaded successfully")
+            logger.info("Модель Whisper загружена")
         return cls._model
 
     @staticmethod
     async def extract_audio(input_path: str, output_path: str) -> None:
-        """Extract audio track from video file using ffmpeg."""
+        # Достаём аудиодорожку из видео через ffmpeg
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None,
@@ -53,17 +51,14 @@ class TranscriptionService:
         language: Optional[str] = None,
         progress_callback=None,
     ) -> Dict[str, Any]:
-        """
-        Transcribe audio file.
-        Returns dict with: text, segments, language
-        """
+        # Транскрибируем аудио, возвращаем текст, сегменты и язык
         lang = language or settings.WHISPER_LANGUAGE
         model = self.get_model()
 
         if progress_callback:
             await progress_callback(10, "Загрузка аудио...")
 
-        # Run in executor to not block the event loop
+        # Запускаем в отдельном потоке чтобы не блокировать event loop
         loop = asyncio.get_event_loop()
 
         def _transcribe():
@@ -80,14 +75,14 @@ class TranscriptionService:
         if progress_callback:
             await progress_callback(60, "Транскрибация завершена")
 
-        # Normalize segments
+        # Приводим сегменты к нужному формату
         segments = [
             {
                 "id": seg["id"],
                 "start": round(seg["start"], 2),
                 "end": round(seg["end"], 2),
                 "text": seg["text"].strip(),
-                "speaker": "SPEAKER_00",  # will be enriched by diarization
+                "speaker": "SPEAKER_00",  # спикер проставится позже при диаризации
             }
             for seg in result.get("segments", [])
         ]
@@ -100,34 +95,33 @@ class TranscriptionService:
 
 
 class DiarizationService:
-    """Speaker diarization using pyannote.audio."""
+    # Определяет кто говорил в каком отрезке времени
 
     def __init__(self):
         self._pipeline = None
 
     def get_pipeline(self):
+        # Загружаем модель диаризации от pyannote
         if self._pipeline is None:
             try:
                 from pyannote.audio import Pipeline
                 import torch
-                logger.info("Loading pyannote diarization pipeline...")
+                logger.info("Загружаем модель диаризации pyannote...")
                 self._pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
                     use_auth_token=os.getenv("HF_TOKEN"),
                 )
                 device = "cuda" if settings.WHISPER_DEVICE == "cuda" else "cpu"
                 self._pipeline = self._pipeline.to(torch.device(device))
-                logger.info("Diarization pipeline loaded")
+                logger.info("Модель диаризации загружена")
             except Exception as e:
-                logger.warning(f"Could not load pyannote pipeline: {e}. Using stub diarization.")
+                logger.warning(f"Не удалось загрузить pyannote: {e}. Используем заглушку.")
                 return None
         return self._pipeline
 
     async def diarize(self, audio_path: str) -> List[Dict[str, Any]]:
-        """
-        Return list of {speaker, start, end} diarization segments.
-        Falls back to single-speaker if pipeline unavailable.
-        """
+        # Возвращаем список отрезков с именами спикеров.
+        # Если модель не загрузилась — считаем что говорит один человек.
         pipeline = self.get_pipeline()
         if pipeline is None:
             return [{"speaker": "SPEAKER_00", "start": 0.0, "end": 99999.0}]
@@ -144,7 +138,7 @@ class DiarizationService:
     def merge_transcript_with_diarization(
         segments: List[Dict], diarization: List[Dict]
     ) -> List[Dict]:
-        """Assign speaker labels to transcript segments based on overlap."""
+        # Проставляем каждому сегменту транскрипта имя спикера из диаризации
         result = []
         for seg in segments:
             seg_mid = (seg["start"] + seg["end"]) / 2

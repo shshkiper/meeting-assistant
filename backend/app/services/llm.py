@@ -1,7 +1,5 @@
-"""
-LLM Service — generates summaries, protocols, and extracts tasks.
-Supports Ollama (on-premise) and OpenAI-compatible APIs.
-"""
+# Сервис для работы с языковой моделью — генерирует саммари, протоколы, извлекает задачи.
+# Работает с Ollama (локально) и OpenAI-совместимыми API.
 
 import json
 import re
@@ -79,10 +77,10 @@ JSON:"""
 
 
 class LLMService:
-    """Unified LLM client for Ollama and OpenAI-compatible providers."""
+    # Один класс для всех LLM — работает и с Ollama и с OpenAI
 
     async def _call(self, prompt: str, max_tokens: int = 2000) -> str:
-        """Call LLM API based on configured provider."""
+        # Выбираем нужный провайдер из настроек
         provider = settings.LLM_PROVIDER.lower()
 
         if provider == "ollama":
@@ -90,9 +88,10 @@ class LLMService:
         elif provider in ("openai", "anthropic"):
             return await self._call_openai_compat(prompt, max_tokens)
         else:
-            raise ValueError(f"Unknown LLM provider: {provider}")
+            raise ValueError(f"Неизвестный провайдер LLM: {provider}")
 
     async def _call_ollama(self, prompt: str, max_tokens: int) -> str:
+        # Отправляем запрос в Ollama (локальный сервер)
         import httpx
         async with httpx.AsyncClient(timeout=300) as client:
             resp = await client.post(
@@ -108,6 +107,7 @@ class LLMService:
             return resp.json()["response"]
 
     async def _call_openai_compat(self, prompt: str, max_tokens: int) -> str:
+        # Отправляем запрос в OpenAI-совместимый API
         import httpx
         headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}"}
         base = settings.LLM_BASE_URL or "https://api.openai.com"
@@ -126,8 +126,8 @@ class LLMService:
             return resp.json()["choices"][0]["message"]["content"]
 
     async def generate_summary(self, transcript_text: str) -> str:
-        """Generate meeting summary."""
-        logger.info("Generating meeting summary...")
+        # Генерируем краткое саммари совещания
+        logger.info("Генерация саммари...")
         prompt = SUMMARY_PROMPT.format(transcript=transcript_text[:8000])
         summary = await self._call(prompt, max_tokens=1000)
         return summary.strip()
@@ -140,8 +140,8 @@ class LLMService:
         chair: str = "—",
         secretary: str = "—",
     ) -> str:
-        """Generate full protocol in Markdown."""
-        logger.info("Generating meeting protocol...")
+        # Генерируем полный протокол в формате Markdown
+        logger.info("Генерация протокола...")
         prompt = PROTOCOL_PROMPT.format(
             transcript=transcript_text[:10000],
             date=date,
@@ -153,15 +153,15 @@ class LLMService:
         return protocol.strip()
 
     async def extract_tasks(self, transcript_text: str) -> List[Dict[str, Any]]:
-        """Extract actionable tasks from transcript."""
-        logger.info("Extracting tasks from transcript...")
+        # Извлекаем задачи и поручения из транскрипта
+        logger.info("Извлечение задач...")
         prompt = TASKS_PROMPT.format(transcript=transcript_text[:8000])
         response = await self._call(prompt, max_tokens=2000)
 
-        # Parse JSON, strip any markdown fences
+        # Убираем markdown-обёртку если LLM добавил ```json ... ```
         json_text = re.sub(r"```(?:json)?|```", "", response).strip()
 
-        # Find first [...] block
+        # Ищем массив [...] в ответе
         match = re.search(r"\[.*\]", json_text, re.DOTALL)
         if match:
             json_text = match.group(0)
@@ -172,7 +172,7 @@ class LLMService:
                 return []
             return tasks
         except json.JSONDecodeError as e:
-            logger.warning(f"Task extraction JSON parse failed: {e}")
+            logger.warning(f"Не удалось распарсить JSON с задачами: {e}")
             return []
 
 

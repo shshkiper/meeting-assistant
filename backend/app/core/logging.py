@@ -1,4 +1,4 @@
-"""Structured logging configuration using loguru."""
+# Настройка логирования через loguru — вывод в консоль и в файл
 
 import sys
 from loguru import logger
@@ -7,6 +7,7 @@ from app.core.config import settings
 
 def setup_logging() -> None:
     logger.remove()
+    # Красивый вывод в консоль
     logger.add(
         sys.stdout,
         level=settings.LOG_LEVEL,
@@ -18,6 +19,7 @@ def setup_logging() -> None:
         ),
         colorize=True,
     )
+    # Запись в файл — ротация по 100 МБ, хранить 30 дней
     logger.add(
         "logs/meeting_assistant.log",
         rotation="100 MB",

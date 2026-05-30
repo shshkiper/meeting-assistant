@@ -1,9 +1,7 @@
-"""
-NLP Analysis Service.
-- Keyword extraction (KeyBERT + YAKE)
-- Contact extraction (spaCy NER)
-- Sentiment analysis (Dostoevsky for Russian)
-"""
+# NLP-анализ текста совещания:
+# - ключевые слова через KeyBERT (если не работает — YAKE как запасной вариант)
+# - извлечение контактов (имена, email, телефоны) через spaCy
+# - анализ тональности для русского текста через Dostoevsky
 
 import re
 from typing import Any, Dict, List, Optional
@@ -40,10 +38,9 @@ class KeywordExtractor:
         return self._yake_extractor
 
     def extract(self, text: str, top_n: int = 15) -> List[Dict[str, Any]]:
-        """Extract keywords using KeyBERT with YAKE fallback."""
+        # Пробуем KeyBERT, если не работает — используем YAKE
         results = []
 
-        # Try KeyBERT
         model = self._get_keybert()
         if model:
             try:
@@ -58,21 +55,21 @@ class KeywordExtractor:
                 results = [{"word": kw, "score": round(score, 4)} for kw, score in keywords]
                 return results
             except Exception as e:
-                logger.warning(f"KeyBERT extraction failed: {e}")
+                logger.warning(f"KeyBERT не сработал: {e}")
 
-        # Fallback to YAKE
+        # Запасной вариант — YAKE
         extractor = self._get_yake()
         if extractor:
             try:
                 keywords = extractor.extract_keywords(text)
-                # YAKE returns (keyword, score) where lower = better
+                # У YAKE меньше = лучше, инвертируем для единообразия
                 results = [
                     {"word": kw, "score": round(1 - min(score, 1), 4)}
                     for kw, score in keywords[:top_n]
                 ]
                 return results
             except Exception as e:
-                logger.warning(f"YAKE extraction failed: {e}")
+                logger.warning(f"YAKE не сработал: {e}")
 
         return results
 
@@ -100,25 +97,25 @@ class ContactExtractor:
     EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}")
 
     def extract(self, text: str) -> List[Dict[str, Any]]:
-        """Extract persons, emails, and phone numbers from text."""
+        # Ищем email-адреса, телефоны и имена людей в тексте
         contacts: Dict[str, Dict] = {}
 
-        # Emails
+        # Email-адреса по регулярному выражению
         for email in self.EMAIL_RE.findall(text):
             contacts[email] = {"email": email, "name": None, "phone": None}
 
-        # Phone numbers
+        # Номера телефонов через библиотеку phonenumbers
         for match in phonenumbers.PhoneNumberMatcher(text, "RU"):
             formatted = phonenumbers.format_number(
                 match.number, phonenumbers.PhoneNumberFormat.E164
             )
             contacts[formatted] = {"phone": formatted, "name": None, "email": None}
 
-        # Named persons via spaCy NER
+        # Имена людей через NER от spaCy
         nlp = self._get_nlp()
         if nlp:
             try:
-                doc = nlp(text[:50000])  # limit for speed
+                doc = nlp(text[:50000])  # берём первые 50к символов для скорости
                 for ent in doc.ents:
                     if ent.label_ == "PER":
                         name = ent.text.strip()
@@ -127,7 +124,7 @@ class ContactExtractor:
                         else:
                             contacts[name]["name"] = name
             except Exception as e:
-                logger.warning(f"NER failed: {e}")
+                logger.warning(f"NER не сработал: {e}")
 
         return list(contacts.values())
 
