@@ -33,6 +33,6 @@ async def get_current_user(
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
     # Проверяем что у пользователя роль администратора
-    if current_user.role.value != "admin":
+    if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Нужны права администратора")
     return current_user

@@ -18,12 +18,11 @@ node_modules/
 dist/
 .eslintcache
 
-# Models & data
+# Models & data (ML weights — не код)
 *.bin
 *.pt
 *.onnx
 *.safetensors
-models/
 .cache/
 
 # Logs
